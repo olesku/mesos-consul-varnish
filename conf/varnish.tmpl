@@ -1,0 +1,86 @@
+vcl 4.0;
+import std;
+import directors;
+{{$domain := "mesos-app.int.vgnett.no"}}
+{{$apps := tree "marathon/" | byKey}}
+
+acl local {
+  "localhost"; 
+  "10.84.100.0"/24;
+  "10.84.200.0"/24;
+}
+
+{{range $appId, $tasks := $apps}} 
+  {{range  $tasks}}
+    {{with $taskInfo := .Value | parseJSON}}
+      {{$backendName := print "be_" ($taskInfo.slaveId | replaceAll "-" "") "_" (index $taskInfo.ports 0)}}
+      // {{$appId}}
+      backend {{$backendName}} {
+        .host = "{{$taskInfo.host}}";
+        .port = "{{index $taskInfo.ports 0}}";
+        
+      }
+    {{end}}
+  {{end}}
+{{end}}
+
+sub vcl_init {
+  {{range $appId, $tasks := $apps}} 
+    {{$directorName := $appId | replaceAll "-" "_" | replaceAll "." "_" | replaceAll "/" "_" | regexReplaceAll "^_" ""}}
+    new {{$directorName}} = directors.round_robin();
+    {{range  $tasks}}
+      {{with $taskInfo := .Value | parseJSON}}
+        {{$backendName := print "be_" ($taskInfo.slaveId | replaceAll "-" "") "_" (index $taskInfo.ports 0)}}
+        {{$directorName}}.add_backend({{$backendName}});
+      {{end}}
+    {{end}}
+  {{end}}
+}
+
+sub vcl_recv {
+  if (req.method == "PURGE") {
+    if (client.ip ~ local) {
+      return (purge);
+    } else {
+      return (synth(405));
+    }
+  }
+
+  if (req.http.host == "localhost") {
+    return(synth(200, "OK"));
+  }
+
+  {{range $appId, $tasks := $apps}} 
+    {{ with $appInfo := key (print "marathon/" $appId) | parseJSON}}
+      {{$directorName := $appId | replaceAll "-" "_" | replaceAll "." "_" | replaceAll "/" "_" | regexReplaceAll "^_" ""}}
+      {{ $appHost := or $appInfo.labels.varnishHost (print "^" ($directorName | replaceAll "_" "-") "." $domain "$")}}
+      elsif (req.http.host ~ "{{$appHost}}"{{if $appInfo.labels.varnishUrl}} && req.url ~ "{{$appInfo.labels.varnishUrl}}"{{end}}) {
+        set req.backend_hint = {{$directorName}}.backend();
+        {{if $appInfo.labels.varnishPass}}return(pass);{{end}}
+      }
+    {{end}}
+  {{end}}
+
+  else {
+    call no_backend_configured;
+  }
+}
+
+sub vcl_backend_response {
+  if (beresp.status == 503) {
+    return (retry);
+  }
+}
+
+sub vcl_deliver {
+  set resp.http.HIT = obj.hits;
+  unset resp.http.X-Powered-By;
+  unset resp.http.Server;
+  unset resp.http.Via;
+  unset resp.http.X-Varnish;
+  return (deliver);
+}
+
+sub no_backend_configured {
+  return(synth(503, "No backend configured for " + req.http.host));
+}

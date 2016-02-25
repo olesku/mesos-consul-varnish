@@ -1,0 +1,32 @@
+#!/usr/bin/perl -w
+
+my @vclList = split("\n", `varnishadm vcl.list`);
+my $vcl_file = "/conf/varnish.vcl";
+my $vcl_alias = sprintf("%s_%s", $vcl_file, time());
+my $cmd = "";
+
+sub load_vcl {
+  $cmd = sprintf("varnishadm vcl.load %s %s", $vcl_alias, $vcl_file);
+  `$cmd`;
+}
+
+sub use_vcl {
+  $cmd = sprintf("varnishadm vcl.use %s", $vcl_alias);
+  `$cmd`;
+}
+
+sub discard_vcls {
+  foreach (@vclList) {
+    my ($status, $objs, $name) = m/(\w+)\s+(\d+)\s+(.+)/;
+
+    if (int($objs) == 0 && $status ne "active") {
+      $cmd = sprintf("varnishadm vcl.discard %s", $name);
+      printf("%s\n", $cmd);
+      `$cmd`;
+    }
+  }
+}
+
+load_vcl();
+use_vcl();
+discard_vcls();
